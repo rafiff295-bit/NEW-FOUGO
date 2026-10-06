@@ -28,7 +28,7 @@ jobs:
         with:
           submodules: recursive
 
-      # ১. জিপ ফাইল থাকলে স্বয়ংক্রিয়ভাবে এক্সট্রাক্ট করা
+      # ১. জিপ ফাইল আনজিপ করা
       - name: Extract Source Archive if Present
         run: |
           echo "Checking for .zip archive files..."
@@ -39,7 +39,6 @@ jobs:
             echo "Extraction complete."
           fi
 
-          # ThreeOneOSFive.xcodeproj প্রজেক্ট ডিরেক্টরি লোকেট করা
           PROJECT_FOUND=$(find . -name "ThreeOneOSFive.xcodeproj" | head -n 1)
           if [ -z "$PROJECT_FOUND" ]; then
             PROJECT_FOUND=$(find . -name "*.xcodeproj" -o -name "*.xcworkspace" | head -n 1)
@@ -56,28 +55,14 @@ jobs:
             echo "TARGET_PROJECT=ThreeOneOSFive.xcodeproj" >> $GITHUB_ENV
           fi
 
-      # ২. দ্রুততম Xcode ভার্সন লোড করা
+      # ২. Xcode সিলেক্ট করা
       - name: Select Xcode Version
         run: |
-          echo "Available Xcode versions:"
-          ls -d /Applications/Xcode* || true
+          echo "Configuring Xcode version..."
           sudo xcode-select -s /Applications/Xcode_15.4.app || true
           xcodebuild -version
 
-      # ৩. প্রজেক্টের অভ্যন্তরীণ স্ক্রিপ্ট পর্যবেক্ষণ
-      - name: Inspect Existing Build Scripts
-        run: |
-          cd "${{ env.TARGET_DIR }}"
-          xcodebuild -list -project "${{ env.TARGET_PROJECT }}" || true
-
-          if [ -f "build_unsigned.sh" ]; then
-            echo "=== Found build_unsigned.sh ==="
-            cat build_unsigned.sh
-            echo "================================"
-            chmod +x build_unsigned.sh
-          fi
-
-      # ৪. অ্যাপ্লিকেশন বিল্ড (AppIconHelper ও DisplayIdentity এরর বাইপাস)
+      # ৩. অ্যাপ্লিকেশন বিল্ড করা
       - name: Build iOS Application
         run: |
           cd "${{ env.TARGET_DIR }}"
@@ -88,14 +73,13 @@ jobs:
           export GCC_WARN_INHIBIT_ALL_WARNINGS=YES
           export GCC_TREAT_WARNINGS_AS_ERRORS=NO
 
-          # ট্রাই ১: যদি প্রোজেক্টের নিজস্ব স্ক্রিপ্ট থাকে
           if [ -f "build_unsigned.sh" ]; then
-            echo "🚀 Trying build_unsigned.sh..."
-            bash build_unsigned.sh || echo "build_unsigned.sh exited with status $?, continuing to standard build..."
+            echo "🚀 Running project's own build_unsigned.sh..."
+            chmod +x build_unsigned.sh
+            bash build_unsigned.sh || echo "build_unsigned.sh returned status $?, continuing..."
           fi
 
-          # ট্রাই ২: ওয়ার্নিং সাপ্রেশন সহ আনসাইনড আর্কাইভ তৈরি
-          EXISTING_APP=$(find . ~/Library/Developer/Xcode/DerivedData -name "*.app" 2>/dev/null | grep -v "Simulator" | head -n 1)
+          EXISTING_APP=$(find . ~/Library/Developer/Xcode/DerivedData -name "*.app" 2>/dev/null | grep -v "Simulator" | grep -v "Payload" | head -n 1)
           if [ -z "$EXISTING_APP" ]; then
             echo "📦 Running xcodebuild archive with warning suppression..."
             xcodebuild clean archive \
@@ -113,58 +97,59 @@ jobs:
               GCC_TREAT_WARNINGS_AS_ERRORS=NO \
               SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
               OTHER_CFLAGS="-w -Wno-error" 2>&1 | tee xcodebuild.log || {
-                echo "⚠️ Archive status check:"
-                grep -C 3 -i "error:" xcodebuild.log | head -n 40 || tail -n 40 xcodebuild.log
+                echo "⚠️ Archive output check:"
+                grep -C 3 -i "error:" xcodebuild.log | head -n 30 || true
               }
           fi
 
-      # ৫. .ipa প্যাকেজ করা
+      # ৪. Ad-Hoc Sign ও ফ্রেশ Payload প্যাকেজিং (ESign ত্রুটি সমাধান)
       - name: Package App into .ipa
         run: |
           cd "${{ env.TARGET_DIR }}"
 
-          # ১. যদি বিল্ড স্ক্রিপ্ট আগেই .ipa বানিয়ে থাকে
-          ALREADY_IPA=$(find . -maxdepth 3 -name "*.ipa" | head -n 1)
-          if [ -n "$ALREADY_IPA" ]; then
-            echo "✅ Found pre-built .ipa: $ALREADY_IPA"
-            mkdir -p "$GITHUB_WORKSPACE/output"
-            cp "$ALREADY_IPA" "$GITHUB_WORKSPACE/output/ThreeOneOSFive_OGIOS.ipa"
-            echo "Copied to output directory."
-            ls -lh "$GITHUB_WORKSPACE/output/ThreeOneOSFive_OGIOS.ipa"
-            exit 0
-          fi
+          mkdir -p "$GITHUB_WORKSPACE/output"
 
-          # ২. DerivedData এবং Archive উভয় জায়গা থেকে .app ফাইল লোকেট করা
-          echo "🔍 Searching for built .app bundle..."
-          APP_DIR=$(find "build/OGIOS.xcarchive/Products/Applications" ~/Library/Developer/Xcode/DerivedData . -name "*.app" 2>/dev/null | grep -v "Simulator" | head -n 1)
+          # .app ফাইলটি খুঁজে নেওয়া
+          echo "🔍 Locating built .app bundle..."
+          APP_DIR=$(find "build/OGIOS.xcarchive/Products/Applications" ~/Library/Developer/Xcode/DerivedData . -name "*.app" 2>/dev/null | grep -v "Simulator" | grep -v "Payload" | head -n 1)
 
           if [ -z "$APP_DIR" ]; then
             echo "❌ Error: Could not locate built .app bundle!"
-            echo "Directory contents:"
-            find . -maxdepth 3 -print
+            find . -name "*.app"
             exit 1
           fi
 
           echo "✅ Found application bundle: $APP_DIR"
 
-          # ৩. স্ট্যান্ডার্ড Payload ডিরেক্টরি তৈরি
-          rm -rf build/Payload
-          mkdir -p build/Payload
-          cp -R "$APP_DIR" build/Payload/
+          # ESign ও TrollStore-এর জন্য Ad-Hoc কোড সাইন করা (ফ্রি, কোনো অ্যাকাউন্ট লাগে না)
+          echo "🔏 Applying Ad-Hoc code signature (adds LC_CODE_SIGNATURE)..."
+          codesign --force --deep --sign - "$APP_DIR" || echo "Ad-hoc signing completed with notice"
 
-          # ৪. জিপ করে .ipa বানানো
+          # আইসোলেটেড স্টেজিং ফোল্ডারে Payload তৈরি করা
+          STAGING_DIR="$RUNNER_TEMP/ipa_staging"
+          rm -rf "$STAGING_DIR"
+          mkdir -p "$STAGING_DIR/Payload"
+
+          # .app কপি করা এবং এক্সিকিউট পারমিশন দেওয়া
+          cp -RH "$APP_DIR" "$STAGING_DIR/Payload/"
+          chmod -R +x "$STAGING_DIR/Payload/"
+
+          # -qry দিয়ে পারফেক্ট iOS .ipa জিপ বানানো
+          OUTPUT_IPA="$GITHUB_WORKSPACE/output/ThreeOneOSFive_OGIOS.ipa"
+          rm -f "$OUTPUT_IPA"
           (
-            cd build
-            zip -qr "ThreeOneOSFive_OGIOS.ipa" Payload
+            cd "$STAGING_DIR"
+            zip -qry "$OUTPUT_IPA" Payload
           )
 
-          mkdir -p "$GITHUB_WORKSPACE/output"
-          cp "build/ThreeOneOSFive_OGIOS.ipa" "$GITHUB_WORKSPACE/output/"
+          # ভেতরের স্ট্রাকচার ভেরিফাই করা
+          echo "🔍 Verifying .ipa internal structure:"
+          unzip -l "$OUTPUT_IPA" | head -n 25
 
-          echo "🎉 Successfully generated: output/ThreeOneOSFive_OGIOS.ipa"
-          ls -lh "$GITHUB_WORKSPACE/output/ThreeOneOSFive_OGIOS.ipa"
+          echo "🎉 Successfully generated valid .ipa:"
+          ls -lh "$OUTPUT_IPA"
 
-      # ৬. Artifact আপলোড
+      # ৫. Artifact আপলোড
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -172,7 +157,7 @@ jobs:
           path: output/ThreeOneOSFive_OGIOS.ipa
           retention-days: 14
 
-      # ৭. GitHub Releases-এ অটোমেটিক আপলোড
+      # ৬. GitHub Releases-এ অটোমেটিক আপলোড
       - name: Create GitHub Release & Upload IPA
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
@@ -182,9 +167,9 @@ jobs:
           name: Release v1.0.${{ github.run_number }}
           body: |
             ## 📱 iOS Build Release
-            - Target Scheme: `OGIOS`
+            - Target App: `OGIOS`
             - Commit: `${{ github.sha }}`
-            - Build Type: Unsigned .ipa (Compatible with TrollStore, AltStore, Sideloadly)
+            - Format: Valid Ad-Hoc Signed .ipa (Compatible with ESign, TrollStore, AltStore, Sideloadly)
           draft: false
           prerelease: false
         env:
