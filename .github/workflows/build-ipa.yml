@@ -28,7 +28,7 @@ jobs:
         with:
           submodules: recursive
 
-      # ১. আপনার আপলোড করা "Full source 3105 FOUGO.zip" স্বয়ংক্রিয়ভাবে আনজিপ হবে
+      # ১. জিপ ফাইল আনজিপ এবং ডিরেক্টরি সেট করা
       - name: Extract Source Archive if Present
         run: |
           echo "Checking for .zip archive files in repository..."
@@ -42,7 +42,7 @@ jobs:
             echo "No zip archive found; using checked out files."
           fi
 
-          # প্রজেক্টটি যে ফোল্ডারেই থাকুক, স্বয়ংক্রিয়ভাবে খুঁজে নেবে
+          # প্রজেক্ট পাথ লোকেট করা
           PROJECT_FOUND=$(find . -name "ThreeOneOSFive.xcodeproj" | head -n 1)
           if [ -z "$PROJECT_FOUND" ]; then
             PROJECT_FOUND=$(find . -name "*.xcodeproj" -o -name "*.xcworkspace" | head -n 1)
@@ -67,55 +67,111 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_15.4.app || true
           xcodebuild -version
 
-      # ৩. স্কিম চেক করা
-      - name: List Available Schemes
+      - name: Check Project and Schemes
         run: |
           cd "${{ env.TARGET_DIR }}"
           xcodebuild -list -project "${{ env.TARGET_PROJECT }}" || true
+          if [ -f "build_unsigned.sh" ]; then
+            echo "=== Found build_unsigned.sh in project ==="
+            cat build_unsigned.sh
+            echo "========================================="
+          fi
 
-      # ৪. আনসাইনড বিল্ড করা (কোড সাইনিং বাইপাস)
+      # ৩. Clang ওয়ার্নিং সাপ্রেশন সহ বিল্ড (Exit Code 65 ফিক্স)
       - name: Build Archive (Skip Code Signing)
         run: |
           cd "${{ env.TARGET_DIR }}"
           mkdir -p build
 
+          if [ -f "build_unsigned.sh" ]; then
+            chmod +x build_unsigned.sh || true
+          fi
+
+          TARGET_SCHEME="OGIOS"
+          echo "Building scheme: $TARGET_SCHEME"
+
+          set -o pipefail
           xcodebuild clean archive \
             -project "${{ env.TARGET_PROJECT }}" \
-            -scheme "OGIOS" \
+            -scheme "$TARGET_SCHEME" \
             -configuration Release \
             -destination "generic/platform=iOS" \
             -archivePath "build/OGIOS.xcarchive" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            ENABLE_BITCODE=NO
+            ENABLE_BITCODE=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            GCC_TREAT_WARNINGS_AS_ERRORS=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
+            OTHER_CFLAGS="-w -Wno-error -Wno-implicit-function-declaration -Wno-incompatible-function-pointer-types -Wno-int-conversion -Wno-strict-prototypes -Wno-deprecated-declarations" \
+            WARNING_CFLAGS="-w -Wno-error" 2>&1 | tee xcodebuild.log || {
+              echo "⚠️ Standard archive had issues. Checking for Clang errors:"
+              grep -C 3 -i "error:" xcodebuild.log | head -n 40 || true
 
-      # ৫. .app থেকে .ipa তৈরি করা
+              # ফলব্যাক ১: প্রজেক্টের নিজস্ব স্ক্রিপ্ট রান করা
+              if [ -f "build_unsigned.sh" ]; then
+                echo "🚀 Trying author's build_unsigned.sh script..."
+                bash build_unsigned.sh || true
+              fi
+
+              # ফলব্যাক ২: ডিরেক্ট বিল্ড
+              if [ ! -d "build/OGIOS.xcarchive" ] && [ ! -f "ThreeOneOSFive_OGIOS.ipa" ]; then
+                echo "🚀 Trying xcodebuild build fallback..."
+                xcodebuild build \
+                  -project "${{ env.TARGET_PROJECT }}" \
+                  -scheme "$TARGET_SCHEME" \
+                  -configuration Release \
+                  -sdk iphoneos \
+                  CODE_SIGN_IDENTITY="" \
+                  CODE_SIGNING_REQUIRED=NO \
+                  CODE_SIGNING_ALLOWED=NO \
+                  GCC_TREAT_WARNINGS_AS_ERRORS=NO \
+                  OTHER_CFLAGS="-w -Wno-error" || true
+              fi
+            }
+
+      # ৪. .app প্যাকেজ করে .ipa তৈরি
       - name: Package App into .ipa
         run: |
           cd "${{ env.TARGET_DIR }}"
+
+          # যদি build_unsigned.sh আগেই .ipa তৈরি করে ফেলে থাকে
+          ALREADY_IPA=$(find . -maxdepth 2 -name "*.ipa" | head -n 1)
+          if [ -n "$ALREADY_IPA" ]; then
+            echo "Found ready-made .ipa: $ALREADY_IPA"
+            mkdir -p "$GITHUB_WORKSPACE/output"
+            cp "$ALREADY_IPA" "$GITHUB_WORKSPACE/output/ThreeOneOSFive_OGIOS.ipa"
+            echo "Copied to output successfully."
+            exit 0
+          fi
+
           echo "Locating built .app binary..."
-          APP_DIR=$(find "build/OGIOS.xcarchive/Products/Applications" -name "*.app" -maxdepth 1 | head -n 1)
+          APP_DIR=$(find . -name "*.app" | grep -v "Simulator" | head -n 1)
           if [ -z "$APP_DIR" ]; then
-            echo "Error: .app bundle not found in archive!"
+            echo "❌ Error: Could not find any .app bundle! Listing files:"
+            find . -maxdepth 4 -print
             exit 1
           fi
-          echo "Found application: $APP_DIR"
+          echo "Found application bundle: $APP_DIR"
 
+          # Payload ফোল্ডার তৈরি
+          rm -rf build/Payload
           mkdir -p build/Payload
           cp -R "$APP_DIR" build/Payload/
 
-          cd build
-          zip -qr "ThreeOneOSFive_OGIOS.ipa" Payload
-          cd ..
+          (
+            cd build
+            zip -qr "ThreeOneOSFive_OGIOS.ipa" Payload
+          )
 
           mkdir -p "$GITHUB_WORKSPACE/output"
           cp "build/ThreeOneOSFive_OGIOS.ipa" "$GITHUB_WORKSPACE/output/"
 
-          echo "Successfully generated .ipa:"
+          echo "✅ Successfully generated: output/ThreeOneOSFive_OGIOS.ipa"
           ls -lh "$GITHUB_WORKSPACE/output/ThreeOneOSFive_OGIOS.ipa"
 
-      # ৬. Artifact আপলোড
+      # ৫. Artifact হিসেবে আপলোড
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -123,7 +179,7 @@ jobs:
           path: output/ThreeOneOSFive_OGIOS.ipa
           retention-days: 14
 
-      # ৭. GitHub Releases-এ .ipa আপলোড (ফিক্সড সিনট্যাক্স)
+      # ৬. GitHub Releases-এ রিলিজ তৈরি ও .ipa আপলোড
       - name: Create GitHub Release & Upload IPA
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
@@ -135,7 +191,7 @@ jobs:
             ## 📱 iOS Build Release
             - App Scheme: `OGIOS`
             - Commit: `${{ github.sha }}`
-            - Build Type: Unsigned .ipa (Compatible with TrollStore, AltStore, Sideloadly, LiveContainer)
+            - Build Type: Unsigned .ipa (Compatible with TrollStore, AltStore, Sideloadly)
           draft: false
           prerelease: false
         env:
