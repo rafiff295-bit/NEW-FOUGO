@@ -1,0 +1,107 @@
+name: Build iOS IPA & Release
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*.*.*'
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: 'Release Notes (রিলিজ বিবরণ)'
+        required: false
+        default: 'Automated iOS IPA build from GitHub Actions'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release-ipa:
+    name: Build .ipa & Publish Release
+    runs-on: macos-14 # Apple Silicon M1 Runner
+
+    steps:
+      # ১. সোর্স কোড চেকআউট করা
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ২. Xcode ভার্সন সিলেক্ট করা
+      - name: Select Xcode Version
+        run: |
+          echo "Available Xcode versions:"
+          ls -d /Applications/Xcode*
+          sudo xcode-select -s /Applications/Xcode_15.4.app || true
+          xcodebuild -version
+
+      # ৩. স্কিম চেক করা
+      - name: Verify Scheme
+        run: |
+          xcodebuild -list -project "ThreeOneOSFive.xcodeproj"
+
+      # ৪. কোড সাইনিং ছাড়া আর্কাইভ তৈরি করা (ফ্রি / আনসাইনড বিল্ড)
+      - name: Build Archive (Skip Code Signing)
+        run: |
+          mkdir -p build
+          xcodebuild clean archive \
+            -project "ThreeOneOSFive.xcodeproj" \
+            -scheme "OGIOS" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "build/OGIOS.xcarchive" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ENABLE_BITCODE=NO
+
+      # ৫. .app ফাইলটিকে Payload ফোল্ডারে নিয়ে .ipa জিপ তৈরি করা
+      - name: Package App into .ipa
+        run: |
+          APP_DIR=$(find "build/OGIOS.xcarchive/Products/Applications" -name "*.app" -maxdepth 1 | head -n 1)
+          if [ -z "$APP_DIR" ]; then
+            echo "❌ Error: .app bundle not found in archive!"
+            exit 1
+          fi
+          echo "Found application bundle: $APP_DIR"
+
+          # Payload ফোল্ডার তৈরি ও কম্প্রেস করা
+          mkdir -p build/Payload
+          cp -R "$APP_DIR" build/Payload/
+
+          cd build
+          zip -qr "ThreeOneOSFive_OGIOS.ipa" Payload
+          cd ..
+
+          echo "✅ Successfully created .ipa:"
+          ls -lh "build/ThreeOneOSFive_OGIOS.ipa"
+
+      # ৬. GitHub Actions Artifact হিসেবে আপলোড করা
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ThreeOneOSFive_OGIOS_ipa
+          path: build/ThreeOneOSFive_OGIOS.ipa
+          retention-days: 14
+
+      # ৭. GitHub Releases-এ অটোমেটিক রিলিজ তৈরি ও .ipa ফাইল যুক্ত করা
+      - name: Create GitHub Release & Upload IPA
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          files: build/ThreeOneOSFive_OGIOS.ipa
+          tag_name: ${{ github.ref_name || format('v1.0.{0}', github.run_number) }}
+          name: ${{ format('Release {0}', github.ref_name || format('Build #{0}', github.run_number)) }}
+          body: |
+            ## 📱 iOS Build Release
+            - **Target Scheme:** `OGIOS`
+            - **Project:** `ThreeOneOSFive.xcodeproj`
+            - **Commit:** `${{ github.sha }}`
+            - **Build Type:** Unsigned `.ipa` (TrollStore, AltStore, Sideloadly, Scarlet সাপোর্টেড)
+            ${{ inputs.release_notes && format('\n### Notes:\n{0}', inputs.release_notes) || '' }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
