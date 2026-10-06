@@ -28,10 +28,10 @@ jobs:
         with:
           submodules: recursive
 
-      # ১. জিপ ফাইল আনজিপ করা
+      # ১. রিপোজিটরির জিপ ফাইল এক্সট্রাক্ট করা
       - name: Extract Source Archive if Present
         run: |
-          echo "Checking for .zip archive files..."
+          echo "Checking for .zip archive files in repo..."
           ZIP_FILE=$(find . -maxdepth 2 -name "*.zip" | head -n 1)
           if [ -n "$ZIP_FILE" ]; then
             echo "Extracting zip archive: $ZIP_FILE..."
@@ -62,94 +62,103 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_15.4.app || true
           xcodebuild -version
 
-      # ৩. অ্যাপ্লিকেশন বিল্ড করা
+      # ৩. স্ক্রিপ্ট পর্যবেক্ষণ
+      - name: Inspect Existing Build Scripts
+        run: |
+          cd "${{ env.TARGET_DIR }}"
+          xcodebuild -list -project "${{ env.TARGET_PROJECT }}" || true
+
+          if [ -f "build_unsigned.sh" ]; then
+            echo "=== Content of build_unsigned.sh ==="
+            cat build_unsigned.sh
+            echo "====================================="
+          fi
+
+      # ৪. অ্যাপ্লিকেশন ডিরেক্ট বিল্ড (Clean Binary Compilation)
       - name: Build iOS Application
         run: |
           cd "${{ env.TARGET_DIR }}"
-          mkdir -p build
           TARGET_SCHEME="OGIOS"
+          BUILD_OUT="$GITHUB_WORKSPACE/build_output"
+          rm -rf "$BUILD_OUT"
+          mkdir -p "$BUILD_OUT"
 
-          export OTHER_CFLAGS="-w -Wno-error"
-          export GCC_WARN_INHIBIT_ALL_WARNINGS=YES
-          export GCC_TREAT_WARNINGS_AS_ERRORS=NO
+          echo "🚀 Building $TARGET_SCHEME for iOS (Release)..."
+          set -o pipefail
 
-          if [ -f "build_unsigned.sh" ]; then
-            echo "🚀 Running project's own build_unsigned.sh..."
-            chmod +x build_unsigned.sh
-            bash build_unsigned.sh || echo "build_unsigned.sh returned status $?, continuing..."
-          fi
+          # ডিরেক্ট CONFIGURATION_BUILD_DIR-এ আউটপুট তৈরি
+          xcodebuild clean build \
+            -project "${{ env.TARGET_PROJECT }}" \
+            -scheme "$TARGET_SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            CONFIGURATION_BUILD_DIR="$BUILD_OUT" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ENABLE_BITCODE=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            GCC_WARN_INHIBIT_ALL_WARNINGS=YES \
+            GCC_TREAT_WARNINGS_AS_ERRORS=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
+            OTHER_CFLAGS="-w -Wno-error -Wno-int-conversion -Wno-implicit-function-declaration -Wno-incompatible-function-pointer-types -Wno-strict-prototypes" \
+            OTHER_CPLUSPLUSFLAGS="-w -Wno-error" 2>&1 | tee xcodebuild.log || {
+              echo "=========================================="
+              echo "❌ Build failed! Showing compilation errors:"
+              echo "=========================================="
+              grep -C 4 -i "error:" xcodebuild.log | head -n 50 || tail -n 50 xcodebuild.log
+              exit 1
+            }
 
-          EXISTING_APP=$(find . ~/Library/Developer/Xcode/DerivedData -name "*.app" 2>/dev/null | grep -v "Simulator" | grep -v "Payload" | head -n 1)
-          if [ -z "$EXISTING_APP" ]; then
-            echo "📦 Running xcodebuild archive with warning suppression..."
-            xcodebuild clean archive \
-              -project "${{ env.TARGET_PROJECT }}" \
-              -scheme "$TARGET_SCHEME" \
-              -configuration Release \
-              -destination "generic/platform=iOS" \
-              -archivePath "build/OGIOS.xcarchive" \
-              CODE_SIGN_IDENTITY="" \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGNING_ALLOWED=NO \
-              ENABLE_BITCODE=NO \
-              COMPILER_INDEX_STORE_ENABLE=NO \
-              GCC_WARN_INHIBIT_ALL_WARNINGS=YES \
-              GCC_TREAT_WARNINGS_AS_ERRORS=NO \
-              SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
-              OTHER_CFLAGS="-w -Wno-error" 2>&1 | tee xcodebuild.log || {
-                echo "⚠️ Archive output check:"
-                grep -C 3 -i "error:" xcodebuild.log | head -n 30 || true
-              }
-          fi
+          echo "✅ Build succeeded! Files in build output directory:"
+          ls -la "$BUILD_OUT"
 
-      # ৪. Ad-Hoc Sign ও ফ্রেশ Payload প্যাকেজিং (ESign ত্রুটি সমাধান)
+      # ৫. Ad-Hoc Sign ও ১০০% নিখুঁত Payload প্যাকেজিং
       - name: Package App into .ipa
         run: |
-          cd "${{ env.TARGET_DIR }}"
-
-          mkdir -p "$GITHUB_WORKSPACE/output"
-
-          # .app ফাইলটি খুঁজে নেওয়া
-          echo "🔍 Locating built .app bundle..."
-          APP_DIR=$(find "build/OGIOS.xcarchive/Products/Applications" ~/Library/Developer/Xcode/DerivedData . -name "*.app" 2>/dev/null | grep -v "Simulator" | grep -v "Payload" | head -n 1)
+          BUILD_OUT="$GITHUB_WORKSPACE/build_output"
+          APP_DIR=$(find "$BUILD_OUT" -maxdepth 2 -name "*.app" | head -n 1)
 
           if [ -z "$APP_DIR" ]; then
-            echo "❌ Error: Could not locate built .app bundle!"
-            find . -name "*.app"
+            echo "❌ Error: Could not locate built .app bundle in $BUILD_OUT!"
+            find "$BUILD_OUT"
             exit 1
           fi
 
           echo "✅ Found application bundle: $APP_DIR"
 
-          # ESign ও TrollStore-এর জন্য Ad-Hoc কোড সাইন করা (ফ্রি, কোনো অ্যাকাউন্ট লাগে না)
-          echo "🔏 Applying Ad-Hoc code signature (adds LC_CODE_SIGNATURE)..."
-          codesign --force --deep --sign - "$APP_DIR" || echo "Ad-hoc signing completed with notice"
+          # ESign-এর জন্য Ad-hoc কোড সাইন করা (ফ্রি, যা আসল অ্যাপ বান্ডেল তৈরি করে)
+          echo "🔏 Applying Ad-Hoc code signature..."
+          codesign --force --deep --sign - "$APP_DIR" || echo "Ad-hoc signing notice"
 
-          # আইসোলেটেড স্টেজিং ফোল্ডারে Payload তৈরি করা
+          # ক্লিন স্টেজিং এরিয়া
           STAGING_DIR="$RUNNER_TEMP/ipa_staging"
           rm -rf "$STAGING_DIR"
           mkdir -p "$STAGING_DIR/Payload"
 
-          # .app কপি করা এবং এক্সিকিউট পারমিশন দেওয়া
+          # .app কপি করা এবং পারমিশন ঠিক করা
           cp -RH "$APP_DIR" "$STAGING_DIR/Payload/"
-          chmod -R +x "$STAGING_DIR/Payload/"
+          chmod -R 755 "$STAGING_DIR/Payload/"
 
-          # -qry দিয়ে পারফেক্ট iOS .ipa জিপ বানানো
+          # -qry দিয়ে স্ট্যান্ডার্ড .ipa বানানো
           OUTPUT_IPA="$GITHUB_WORKSPACE/output/ThreeOneOSFive_OGIOS.ipa"
+          mkdir -p "$GITHUB_WORKSPACE/output"
           rm -f "$OUTPUT_IPA"
+
           (
             cd "$STAGING_DIR"
             zip -qry "$OUTPUT_IPA" Payload
           )
 
-          # ভেতরের স্ট্রাকচার ভেরিফাই করা
+          # ভেতরে ফাইলগুলো ঠিক আছে কিনা ভেরিফাই করা
           echo "🔍 Verifying .ipa internal structure:"
           unzip -l "$OUTPUT_IPA" | head -n 25
 
           echo "🎉 Successfully generated valid .ipa:"
           ls -lh "$OUTPUT_IPA"
 
-      # ৫. Artifact আপলোড
+      # ৬. Artifact আপলোড
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -157,7 +166,7 @@ jobs:
           path: output/ThreeOneOSFive_OGIOS.ipa
           retention-days: 14
 
-      # ৬. GitHub Releases-এ অটোমেটিক আপলোড
+      # ৭. GitHub Releases-এ অটোমেটিক আপলোড
       - name: Create GitHub Release & Upload IPA
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
