@@ -66,25 +66,19 @@ jobs:
       - name: Provide Missing SDK Headers
         run: |
           IPHONEOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          MACOSX_SDK=$(xcrun --sdk macosx --show-sdk-path)
           echo "iPhoneOS SDK path: $IPHONEOS_SDK"
-          echo "MacOSX SDK path: $MACOSX_SDK"
 
           sudo mkdir -p "$IPHONEOS_SDK/usr/include/sys"
 
-          FOUND_FILEPORT=$(find "$MACOSX_SDK" -name "fileport.h" 2>/dev/null | head -n 1)
-          if [ -z "$FOUND_FILEPORT" ]; then
-            FOUND_FILEPORT=$(find /Applications/Xcode*.app -name "fileport.h" 2>/dev/null | head -n 1)
-          fi
+          # Write complete, valid sys/fileport.h (defines fileport_t, fileport_makeport, fileport_makefd)
+          echo "I2lmbmRlZiBfU1lTX0ZJTEVQT1JUX0hfCiNkZWZpbmUgX1NZU19GSUxFUE9SVF9IXwojaW5jbHVkZSA8c3lzL2NkZWZzLmg+CiNpbmNsdWRlIDxtYWNoL3BvcnQuaD4KdHlwZWRlZiBtYWNoX3BvcnRfdCBmaWxlcG9ydF90OwojZGVmaW5lIEZJTEVQT1JUX05VTEwgKChmaWxlcG9ydF90KTApCl9fQkVHSU5fREVDTFMKaW50IGZpbGVwb3J0X21ha2Vwb3J0KGludCwgZmlsZXBvcnRfdCAqKTsKaW50IGZpbGVwb3J0X21ha2VmZChmaWxlcG9ydF90KTsKX19FTkRfREVDTFMKI2VuZGlmCg==" | base64 --decode | sudo tee "$IPHONEOS_SDK/usr/include/sys/fileport.h" > /dev/null
 
-          if [ -n "$FOUND_FILEPORT" ]; then
-            echo "Copying fileport.h from $FOUND_FILEPORT..."
-            sudo cp "$FOUND_FILEPORT" "$IPHONEOS_SDK/usr/include/sys/fileport.h"
-          else
-            echo "Creating empty fileport.h placeholder..."
-            sudo touch "$IPHONEOS_SDK/usr/include/sys/fileport.h"
-          fi
-          echo "Header verified: $IPHONEOS_SDK/usr/include/sys/fileport.h"
+          # Also place in project source tree for reliable discovery
+          mkdir -p "${{ env.TARGET_DIR }}/sys"
+          cp "$IPHONEOS_SDK/usr/include/sys/fileport.h" "${{ env.TARGET_DIR }}/sys/fileport.h" || true
+
+          echo "✅ Verified header contents:"
+          cat "$IPHONEOS_SDK/usr/include/sys/fileport.h"
 
       # ৩. Build iOS App Binary (with Warning Inhibition & Direct Output Directory)
       - name: Build iOS Application
@@ -94,12 +88,13 @@ jobs:
           BUILD_OUT="$GITHUB_WORKSPACE/build_output"
           rm -rf "$BUILD_OUT"
           mkdir -p "$BUILD_OUT"
+          xattr -w com.apple.xcode.CreatedByBuildSystem true "$BUILD_OUT" 2>/dev/null || true
 
           echo "🚀 Building $TARGET_SCHEME for iOS (Release)..."
           set -o pipefail
 
-          # Build directly into CONFIGURATION_BUILD_DIR with Clang warning inhibitors
-          xcodebuild clean build \
+          # Build directly into CONFIGURATION_BUILD_DIR (omit 'clean' to prevent Xcode directory delete error)
+          xcodebuild build \
             -project "${{ env.TARGET_PROJECT }}" \
             -scheme "$TARGET_SCHEME" \
             -configuration Release \
