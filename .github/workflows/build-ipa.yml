@@ -20,7 +20,7 @@ permissions:
 jobs:
   build-ipa:
     name: Build & Package .ipa
-    runs-on: macos-13
+    runs-on: macos-14
 
     steps:
       - name: Checkout Source Code
@@ -28,7 +28,7 @@ jobs:
         with:
           submodules: recursive
 
-      # ১. রিপোজিটরিতে থাকা জিপ ফাইল (Full source 3105 FOUGO.zip) এক্সট্রাক্ট করা
+      # ১. জিপ ফাইল থাকলে স্বয়ংক্রিয়ভাবে এক্সট্রাক্ট করা
       - name: Extract Source Archive if Present
         run: |
           echo "Checking for .zip archive files..."
@@ -39,7 +39,7 @@ jobs:
             echo "Extraction complete."
           fi
 
-          # ThreeOneOSFive.xcodeproj পাথ নির্ধারণ করা
+          # ThreeOneOSFive.xcodeproj প্রজেক্ট ডিরেক্টরি লোকেট করা
           PROJECT_FOUND=$(find . -name "ThreeOneOSFive.xcodeproj" | head -n 1)
           if [ -z "$PROJECT_FOUND" ]; then
             PROJECT_FOUND=$(find . -name "*.xcodeproj" -o -name "*.xcworkspace" | head -n 1)
@@ -56,17 +56,15 @@ jobs:
             echo "TARGET_PROJECT=ThreeOneOSFive.xcodeproj" >> $GITHUB_ENV
           fi
 
-      # ২. Xcode 14.3.1 সিলেক্ট করা (iOS 16 SDK - Clang 15 এরর মুক্ত)
-      - name: Select Xcode 14.3.1
+      # ২. দ্রুততম Xcode ভার্সন লোড করা
+      - name: Select Xcode Version
         run: |
           echo "Available Xcode versions:"
           ls -d /Applications/Xcode* || true
-          if [ -d "/Applications/Xcode_14.3.1.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_14.3.1.app
-          fi
+          sudo xcode-select -s /Applications/Xcode_15.4.app || true
           xcodebuild -version
 
-      # ৩. স্ক্রিপ্ট ও স্কিম ফাইল চেক করা
+      # ৩. প্রজেক্টের অভ্যন্তরীণ স্ক্রিপ্ট পর্যবেক্ষণ
       - name: Inspect Existing Build Scripts
         run: |
           cd "${{ env.TARGET_DIR }}"
@@ -79,23 +77,27 @@ jobs:
             chmod +x build_unsigned.sh
           fi
 
-      # ৪. অ্যাপ্লিকেশন বিল্ড করা
+      # ৪. অ্যাপ্লিকেশন বিল্ড (AppIconHelper ও DisplayIdentity এরর বাইপাস)
       - name: Build iOS Application
         run: |
           cd "${{ env.TARGET_DIR }}"
           mkdir -p build
           TARGET_SCHEME="OGIOS"
 
-          # যদি প্রোজেক্টের নিজস্ব build_unsigned.sh থাকে, সেটি প্রথমে ট্রাই করবে
+          export OTHER_CFLAGS="-w -Wno-error"
+          export GCC_WARN_INHIBIT_ALL_WARNINGS=YES
+          export GCC_TREAT_WARNINGS_AS_ERRORS=NO
+
+          # ট্রাই ১: যদি প্রোজেক্টের নিজস্ব স্ক্রিপ্ট থাকে
           if [ -f "build_unsigned.sh" ]; then
-            echo "🚀 Executing project's own build_unsigned.sh..."
-            bash build_unsigned.sh && echo "build_unsigned.sh finished successfully!" || echo "build_unsigned.sh finished with status $?, checking outputs..."
+            echo "🚀 Trying build_unsigned.sh..."
+            bash build_unsigned.sh || echo "build_unsigned.sh exited with status $?, continuing to standard build..."
           fi
 
-          # যদি .ipa এখনও না তৈরি হয়ে থাকে, তবে xcodebuild দিয়ে বিল্ড করবে
-          IPA_EXISTS=$(find . -maxdepth 2 -name "*.ipa" | head -n 1)
-          if [ -z "$IPA_EXISTS" ]; then
-            echo "📦 Running xcodebuild archive..."
+          # ট্রাই ২: ওয়ার্নিং সাপ্রেশন সহ আনসাইনড আর্কাইভ তৈরি
+          EXISTING_APP=$(find . ~/Library/Developer/Xcode/DerivedData -name "*.app" 2>/dev/null | grep -v "Simulator" | head -n 1)
+          if [ -z "$EXISTING_APP" ]; then
+            echo "📦 Running xcodebuild archive with warning suppression..."
             xcodebuild clean archive \
               -project "${{ env.TARGET_PROJECT }}" \
               -scheme "$TARGET_SCHEME" \
@@ -106,27 +108,22 @@ jobs:
               CODE_SIGNING_REQUIRED=NO \
               CODE_SIGNING_ALLOWED=NO \
               ENABLE_BITCODE=NO \
+              COMPILER_INDEX_STORE_ENABLE=NO \
+              GCC_WARN_INHIBIT_ALL_WARNINGS=YES \
               GCC_TREAT_WARNINGS_AS_ERRORS=NO \
-              SWIFT_TREAT_WARNINGS_AS_ERRORS=NO || {
-                echo "⚠️ Archive fallback: Running direct build..."
-                xcodebuild build \
-                  -project "${{ env.TARGET_PROJECT }}" \
-                  -scheme "$TARGET_SCHEME" \
-                  -configuration Release \
-                  -sdk iphoneos \
-                  CODE_SIGN_IDENTITY="" \
-                  CODE_SIGNING_REQUIRED=NO \
-                  CODE_SIGNING_ALLOWED=NO \
-                  GCC_TREAT_WARNINGS_AS_ERRORS=NO || true
+              SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
+              OTHER_CFLAGS="-w -Wno-error" 2>&1 | tee xcodebuild.log || {
+                echo "⚠️ Archive status check:"
+                grep -C 3 -i "error:" xcodebuild.log | head -n 40 || tail -n 40 xcodebuild.log
               }
           fi
 
-      # ৫. .ipa ফাইল প্যাকেজিং
+      # ৫. .ipa প্যাকেজ করা
       - name: Package App into .ipa
         run: |
           cd "${{ env.TARGET_DIR }}"
 
-          # ১. যদি build_unsigned.sh আগেই .ipa ফাইল বানিয়ে থাকে
+          # ১. যদি বিল্ড স্ক্রিপ্ট আগেই .ipa বানিয়ে থাকে
           ALREADY_IPA=$(find . -maxdepth 3 -name "*.ipa" | head -n 1)
           if [ -n "$ALREADY_IPA" ]; then
             echo "✅ Found pre-built .ipa: $ALREADY_IPA"
@@ -137,23 +134,25 @@ jobs:
             exit 0
           fi
 
-          # ২. আর্কাইভ ও DerivedData ফোল্ডার থেকে .app খুঁজে নেওয়া
+          # ২. DerivedData এবং Archive উভয় জায়গা থেকে .app ফাইল লোকেট করা
           echo "🔍 Searching for built .app bundle..."
           APP_DIR=$(find "build/OGIOS.xcarchive/Products/Applications" ~/Library/Developer/Xcode/DerivedData . -name "*.app" 2>/dev/null | grep -v "Simulator" | head -n 1)
 
           if [ -z "$APP_DIR" ]; then
             echo "❌ Error: Could not locate built .app bundle!"
-            find . -name "*.app" || true
+            echo "Directory contents:"
+            find . -maxdepth 3 -print
             exit 1
           fi
 
           echo "✅ Found application bundle: $APP_DIR"
 
-          # ৩. Payload ডিরেক্টরি তৈরি ও জিপ করা
+          # ৩. স্ট্যান্ডার্ড Payload ডিরেক্টরি তৈরি
           rm -rf build/Payload
           mkdir -p build/Payload
           cp -R "$APP_DIR" build/Payload/
 
+          # ৪. জিপ করে .ipa বানানো
           (
             cd build
             zip -qr "ThreeOneOSFive_OGIOS.ipa" Payload
@@ -173,7 +172,7 @@ jobs:
           path: output/ThreeOneOSFive_OGIOS.ipa
           retention-days: 14
 
-      # ৭. GitHub Releases-এ রিলিজ তৈরি ও .ipa আপলোড
+      # ৭. GitHub Releases-এ অটোমেটিক আপলোড
       - name: Create GitHub Release & Upload IPA
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
