@@ -121,7 +121,7 @@ jobs:
           echo "✅ Build succeeded! Files in build output directory:"
           ls -la "$BUILD_OUT"
 
-      # ৪. Package into Valid Sideloadable .ipa (Ad-Hoc Signed & Symlink Preserved)
+      # ৪. Package into Valid Sideloadable .ipa (Rename to FOUGO & Ad-Hoc Signed)
       - name: Package App into .ipa
         run: |
           BUILD_OUT="$GITHUB_WORKSPACE/build_output"
@@ -134,6 +134,14 @@ jobs:
           fi
 
           echo "✅ Found application bundle: $APP_DIR"
+
+          # Update App Display Name in Info.plist (হোম স্ক্রিনে আইকনের নিচে FOUGO নাম দেখাবে)
+          if [ -f "$APP_DIR/Info.plist" ]; then
+            echo "📱 Updating App Display Name on iPhone Home Screen to FOUGO..."
+            /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName FOUGO" "$APP_DIR/Info.plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string FOUGO" "$APP_DIR/Info.plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Set :CFBundleName FOUGO" "$APP_DIR/Info.plist" 2>/dev/null || true
+          fi
 
           # Ad-hoc sign so ESign and iOS recognise valid Mach-O LC_CODE_SIGNATURE
           echo "🔏 Applying Ad-Hoc code signature..."
@@ -148,8 +156,8 @@ jobs:
           cp -RH "$APP_DIR" "$STAGING_DIR/Payload/"
           chmod -R 755 "$STAGING_DIR/Payload/"
 
-          # Zip Payload into .ipa (with -qry for symlinks and valid zip header)
-          OUTPUT_IPA="$GITHUB_WORKSPACE/output/ThreeOneOSFive_OGIOS.ipa"
+          # Zip Payload into .ipa (named FOUGO.ipa)
+          OUTPUT_IPA="$GITHUB_WORKSPACE/output/FOUGO.ipa"
           mkdir -p "$GITHUB_WORKSPACE/output"
           rm -f "$OUTPUT_IPA"
 
@@ -169,8 +177,8 @@ jobs:
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ThreeOneOSFive_OGIOS
-          path: output/ThreeOneOSFive_OGIOS.ipa
+          name: FOUGO
+          path: output/FOUGO.ipa
           retention-days: 14
 
       # ৬. Create GitHub Release
@@ -178,12 +186,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
-          files: output/ThreeOneOSFive_OGIOS.ipa
+          files: output/FOUGO.ipa
           tag_name: v1.0.${{ github.run_number }}
           name: Release v1.0.${{ github.run_number }}
           body: |
             ## 📱 iOS Build Release
-            - Target App: `OGIOS`
+            - Target App: `FOUGO`
             - Commit: `${{ github.sha }}`
             - Format: Valid Ad-Hoc Signed .ipa (Compatible with ESign, TrollStore, AltStore, Sideloadly)
           draft: false
