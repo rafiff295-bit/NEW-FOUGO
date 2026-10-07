@@ -1,99 +1,81 @@
-name: Build iOS IPA
+name: Build iOS IPA (Unsigned / Sideloadable)
 
 on:
   push:
-    branches: [ main, master ]
-    tags:
-      - 'v*.*.*'
-      - 'v*'
+    branches:
+      - main
+      - master
   workflow_dispatch:
-    inputs:
-      release_title:
-        description: 'Release Title'
-        required: false
-        default: 'New iOS Build'
-        type: string
 
 permissions:
   contents: write
 
 jobs:
-  build-ipa:
-    name: Build & Package .ipa
+  build-unsigned-ipa:
+    name: Compile & Package Unsigned .ipa
     runs-on: macos-14
 
     steps:
+      # ১. চেকআউট রিপোজিটরি
       - name: Checkout Source Code
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # ১. Auto-Extract ZIP if present (e.g. Full source 3105 FOUGO.zip)
+      # ২. ফুল সোর্স জিপ থাকলে অটো-আনজিপ (Full source 3105 FOUGO.zip)
       - name: Extract Source Archive if Present
         run: |
-          echo "Checking for .zip archive files in repo..."
           ZIP_FILE=$(find . -maxdepth 2 -name "*.zip" | head -n 1)
           if [ -n "$ZIP_FILE" ]; then
-            echo "Extracting zip archive: $ZIP_FILE..."
+            echo "📦 Extracting $ZIP_FILE..."
             unzip -q -o "$ZIP_FILE"
-            echo "Extraction complete."
           fi
-
-          # Find where the .xcodeproj is located
           PROJECT_FOUND=$(find . -name "ThreeOneOSFive.xcodeproj" | head -n 1)
           if [ -z "$PROJECT_FOUND" ]; then
             PROJECT_FOUND=$(find . -name "*.xcodeproj" -o -name "*.xcworkspace" | head -n 1)
           fi
-
           if [ -n "$PROJECT_FOUND" ]; then
-            DIR_PATH=$(dirname "$PROJECT_FOUND")
-            FILE_NAME=$(basename "$PROJECT_FOUND")
-            echo "TARGET_DIR=$DIR_PATH" >> $GITHUB_ENV
-            echo "TARGET_PROJECT=$FILE_NAME" >> $GITHUB_ENV
-            echo "Found project at: $DIR_PATH / $FILE_NAME"
+            echo "TARGET_DIR=$(dirname "$PROJECT_FOUND")" >> $GITHUB_ENV
+            echo "TARGET_PROJECT=$(basename "$PROJECT_FOUND")" >> $GITHUB_ENV
           else
             echo "TARGET_DIR=." >> $GITHUB_ENV
             echo "TARGET_PROJECT=ThreeOneOSFive.xcodeproj" >> $GITHUB_ENV
           fi
 
+      # ৩. Xcode সিলেক্ট ও কম্পাইল
       - name: Select Xcode Version
         run: |
-          echo "Configuring Xcode version..."
           sudo xcode-select -s /Applications/Xcode_15.4.app || true
           xcodebuild -version
 
-      # ২. Fix Missing Private Headers (sys/fileport.h for OPA334 kexploit)
-      - name: Provide Missing SDK Headers
-        run: |
-          IPHONEOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          echo "iPhoneOS SDK path: $IPHONEOS_SDK"
-
-          sudo mkdir -p "$IPHONEOS_SDK/usr/include/sys"
-
-          # Write complete, valid sys/fileport.h (defines fileport_t, fileport_makeport, fileport_makefd)
-          echo "I2lmbmRlZiBfU1lTX0ZJTEVQT1JUX0hfCiNkZWZpbmUgX1NZU19GSUxFUE9SVF9IXwojaW5jbHVkZSA8c3lzL2NkZWZzLmg+CiNpbmNsdWRlIDxtYWNoL3BvcnQuaD4KdHlwZWRlZiBtYWNoX3BvcnRfdCBmaWxlcG9ydF90OwojZGVmaW5lIEZJTEVQT1JUX05VTEwgKChmaWxlcG9ydF90KTApCl9fQkVHSU5fREVDTFMKaW50IGZpbGVwb3J0X21ha2Vwb3J0KGludCwgZmlsZXBvcnRfdCAqKTsKaW50IGZpbGVwb3J0X21ha2VmZChmaWxlcG9ydF90KTsKX19FTkRfREVDTFMKI2VuZGlmCg==" | base64 --decode | sudo tee "$IPHONEOS_SDK/usr/include/sys/fileport.h" > /dev/null
-
-          # Also place in project source tree for reliable discovery
-          mkdir -p "${{ env.TARGET_DIR }}/sys"
-          cp "$IPHONEOS_SDK/usr/include/sys/fileport.h" "${{ env.TARGET_DIR }}/sys/fileport.h" || true
-
-          echo "✅ Verified header contents:"
-          cat "$IPHONEOS_SDK/usr/include/sys/fileport.h"
-
-      # ৩. Build iOS App Binary (with Warning Inhibition & Direct Output Directory)
-      - name: Build iOS Application
+      # ৪. FOUGO Scheme বিল্ড ও Info.plist এ FOUGO নাম সেট
+      - name: Build Xcode Project (Skip Signing & Ad-Hoc Sign)
         run: |
           cd "${{ env.TARGET_DIR }}"
-          TARGET_SCHEME="OGIOS"
+          TARGET_SCHEME="FOUGO"
+
+          # Detect available schemes in the Xcode project
+          AVAILABLE_SCHEMES=$(xcodebuild -list -project "${{ env.TARGET_PROJECT }}" 2>/dev/null | awk '/Schemes:/{flag=1;next} flag && !/^$/{gsub(/^[ \t]+/, ""); print; if (/^$/) flag=0}')
+          echo "📋 Available schemes found:"
+          echo "$AVAILABLE_SCHEMES"
+
+          MATCHED_SCHEME=$(echo "$AVAILABLE_SCHEMES" | grep -Ei '^(FOUGO|OGIOS|ThreeOneOSFive)$' | head -n 1)
+          if [ -n "$MATCHED_SCHEME" ]; then
+            TARGET_SCHEME="$MATCHED_SCHEME"
+            echo "🎯 Selected scheme: $TARGET_SCHEME"
+          else
+            FIRST_SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -n 1)
+            if [ -n "$FIRST_SCHEME" ]; then
+              TARGET_SCHEME="$FIRST_SCHEME"
+              echo "🎯 Fallback to first scheme: $TARGET_SCHEME"
+            fi
+          fi
+
           BUILD_OUT="$GITHUB_WORKSPACE/build_output"
           rm -rf "$BUILD_OUT"
           mkdir -p "$BUILD_OUT"
-          xattr -w com.apple.xcode.CreatedByBuildSystem true "$BUILD_OUT" 2>/dev/null || true
 
-          echo "🚀 Building $TARGET_SCHEME for iOS (Release)..."
-          set -o pipefail
-
-          # Build directly into CONFIGURATION_BUILD_DIR (omit 'clean' to prevent Xcode directory delete error)
+          echo "🚀 Compiling project $TARGET_PROJECT (Scheme: $TARGET_SCHEME)..."
           xcodebuild build \
             -project "${{ env.TARGET_PROJECT }}" \
             -scheme "$TARGET_SCHEME" \
@@ -105,28 +87,10 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             ENABLE_BITCODE=NO \
-            COMPILER_INDEX_STORE_ENABLE=NO \
             GCC_WARN_INHIBIT_ALL_WARNINGS=YES \
-            GCC_TREAT_WARNINGS_AS_ERRORS=NO \
-            SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
-            OTHER_CFLAGS="-w -Wno-error -Wno-int-conversion -Wno-implicit-function-declaration -Wno-incompatible-function-pointer-types -Wno-strict-prototypes" \
-            OTHER_CPLUSPLUSFLAGS="-w -Wno-error" 2>&1 | tee xcodebuild.log || {
-              echo "=========================================="
-              echo "❌ Build failed! Showing compilation errors:"
-              echo "=========================================="
-              grep -C 4 -i "error:" xcodebuild.log | head -n 50 || tail -n 50 xcodebuild.log
-              exit 1
-            }
+            GCC_TREAT_WARNINGS_AS_ERRORS=NO
 
-          echo "✅ Build succeeded! Files in build output directory:"
-          ls -la "$BUILD_OUT"
-
-      # ৪. Package into Valid Sideloadable .ipa (Rename to FOUGO & Ad-Hoc Signed)
-      - name: Package App into .ipa
-        run: |
-          BUILD_OUT="$GITHUB_WORKSPACE/build_output"
           APP_DIR=$(find "$BUILD_OUT" -maxdepth 2 -name "*.app" | head -n 1)
-
           if [ -z "$APP_DIR" ]; then
             echo "❌ Error: Could not locate built .app bundle in $BUILD_OUT!"
             find "$BUILD_OUT"
@@ -135,28 +99,24 @@ jobs:
 
           echo "✅ Found application bundle: $APP_DIR"
 
-          # Update App Display Name in Info.plist (হোম স্ক্রিনে আইকনের নিচে FOUGO নাম দেখাবে)
+          # iPhone Home Screen-এ অ্যাপের ডিসপ্লে নাম FOUGO সেট
           if [ -f "$APP_DIR/Info.plist" ]; then
-            echo "📱 Updating App Display Name on iPhone Home Screen to FOUGO..."
+            echo "📱 Updating App Display Name to FOUGO..."
             /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName FOUGO" "$APP_DIR/Info.plist" 2>/dev/null || \
             /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string FOUGO" "$APP_DIR/Info.plist" 2>/dev/null || true
             /usr/libexec/PlistBuddy -c "Set :CFBundleName FOUGO" "$APP_DIR/Info.plist" 2>/dev/null || true
           fi
 
-          # Ad-hoc sign so ESign and iOS recognise valid Mach-O LC_CODE_SIGNATURE
+          # Ad-hoc sign
           echo "🔏 Applying Ad-Hoc code signature..."
           codesign --force --deep --sign - "$APP_DIR" || echo "Ad-hoc signing notice"
 
-          # Isolated staging directory
           STAGING_DIR="$RUNNER_TEMP/ipa_staging"
           rm -rf "$STAGING_DIR"
           mkdir -p "$STAGING_DIR/Payload"
-
-          # Copy .app bundle into Payload/
           cp -RH "$APP_DIR" "$STAGING_DIR/Payload/"
           chmod -R 755 "$STAGING_DIR/Payload/"
 
-          # Zip Payload into .ipa (named FOUGO.ipa)
           OUTPUT_IPA="$GITHUB_WORKSPACE/output/FOUGO.ipa"
           mkdir -p "$GITHUB_WORKSPACE/output"
           rm -f "$OUTPUT_IPA"
@@ -166,14 +126,10 @@ jobs:
             zip -qry "$OUTPUT_IPA" Payload
           )
 
-          # Verify IPA internal structure
-          echo "🔍 Verifying .ipa internal structure:"
-          unzip -l "$OUTPUT_IPA" | head -n 25
-
           echo "🎉 Successfully generated valid .ipa:"
           ls -lh "$OUTPUT_IPA"
 
-      # ৫. Upload Artifact
+      # ৫. আর্টিকেক্ট আপলোড
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -181,7 +137,49 @@ jobs:
           path: output/FOUGO.ipa
           retention-days: 14
 
-      # ৬. Create GitHub Release
+      # ৬. 🤖 সরাসরি Telegram Bot ও চ্যানেলে .ipa ফাইল পাঠানো (NEW!)
+      - name: Send .IPA to Telegram Bot & Channel
+        if: always() && hashFiles('output/FOUGO.ipa') != ''
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          echo "🤖 Checking Telegram Bot configuration..."
+          IPA_FILE="output/FOUGO.ipa"
+          
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "⚠️ Telegram Bot Token or Chat ID secret not configured in GitHub Repository Secrets."
+            echo "ℹ️ To receive the .ipa directly on Telegram, add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID under Settings -> Secrets."
+            exit 0
+          fi
+
+          if [ ! -f "$IPA_FILE" ]; then
+            echo "❌ IPA file not found at $IPA_FILE"
+            exit 1
+          fi
+
+          FILE_SIZE=$(ls -lh "$IPA_FILE" | awk '{print $5}')
+          CAPTION="🚀 <b>New iOS .ipa Build Ready!</b>%0A%0A📱 <b>App:</b> FOUGO%0A📦 <b>File:</b> FOUGO.ipa%0A⚖️ <b>Size:</b> $FILE_SIZE%0A🏷️ <b>Build:</b> #${{ github.run_number }}%0A🔗 <b>Commit:</b> ${{ github.sha }}%0A%0A✅ <i>Tested for TrollStore, ESign, Scarlet, Sideloadly</i>"
+
+          echo "📤 Uploading $IPA_FILE ($FILE_SIZE) to Telegram..."
+          RESPONSE=$(curl -s -F chat_id="$TELEGRAM_CHAT_ID" \
+            -F document=@"$IPA_FILE" \
+            -F caption="$CAPTION" \
+            -F parse_mode="HTML" \
+            "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendDocument")
+
+          if echo "$RESPONSE" | grep -q '"ok":true'; then
+            echo "🎉 Successfully sent .ipa file to Telegram bot/channel!"
+          else
+            echo "⚠️ Direct document upload response: $RESPONSE"
+            echo "📨 Sending fallback notification message..."
+            curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+              -d chat_id="$TELEGRAM_CHAT_ID" \
+              -d parse_mode="HTML" \
+              -d text="🚀 <b>iOS .ipa Build Complete!</b>%0A%0A📱 <b>App:</b> FOUGO%0A📦 <b>File:</b> FOUGO.ipa ($FILE_SIZE)%0A🏷️ <b>Run:</b> #${{ github.run_number }}%0A⬇️ <b>Download from GitHub Releases / Actions Artifacts</b>" || true
+          fi
+
+      # ৭. GitHub Releases-এ রিলিজ তৈরি
       - name: Create GitHub Release & Upload IPA
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
